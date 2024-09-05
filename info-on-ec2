@@ -1,0 +1,90 @@
+import boto3
+import datetime
+
+def get_ec2_instances_info():
+    client = boto3.client('ec2')
+    autoscaling_client = boto3.client('autoscaling')
+    cloudwatch_client = boto3.client('cloudwatch')
+
+    # List all regions
+    regions = [region['RegionName'] for region in client.describe_regions()['Regions']]
+    
+    result = []
+
+    for region in regions:
+        ec2 = boto3.client('ec2', region_name=region)
+        asg = boto3.client('autoscaling', region_name=region)
+
+        # Get all instances with their tags
+        instances = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+        
+        for reservation in instances['Reservations']:
+            for instance in reservation['Instances']:
+                instance_id = instance['InstanceId']
+                instance_type = instance['InstanceType']
+                launch_time = instance['LaunchTime']
+                instance_age = (datetime.datetime.now(instance['LaunchTime'].tzinfo) - launch_time).days
+                tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+
+                # Get ASG info
+                asg_name = tags.get('aws:autoscaling:groupName')
+                if asg_name:
+                    asg_info = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
+                    if asg_info['AutoScalingGroups']:
+                        asg_info = asg_info['AutoScalingGroups'][0]
+                        asg_min_size = asg_info['MinSize']
+                        asg_max_size = asg_info['MaxSize']
+                        asg_desired_capacity = asg_info['DesiredCapacity']
+                    else:
+                        asg_min_size = asg_max_size = asg_desired_capacity = 'N/A'
+                else:
+                    asg_name = asg_min_size = asg_max_size = asg_desired_capacity = 'N/A'
+
+                # Get CPU metrics
+                cpu_metrics = cloudwatch_client.get_metric_statistics(
+                    Namespace='AWS/EC2',
+                    MetricName='CPUUtilization',
+                    Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                    StartTime=datetime.datetime.utcnow() - datetime.timedelta(days=7),
+                    EndTime=datetime.datetime.utcnow(),
+                    Period=3600,
+                    Statistics=['Average', 'Maximum', 'Minimum']
+                )
+                
+                cpu_stats = {'Average': 0, 'Maximum': 0, 'Minimum': 0}
+                if cpu_metrics['Datapoints']:
+                    cpu_stats['Average'] = sum([datapoint['Average'] for datapoint in cpu_metrics['Datapoints']]) / len(cpu_metrics['Datapoints'])
+                    cpu_stats['Maximum'] = max([datapoint['Maximum'] for datapoint in cpu_metrics['Datapoints']])
+                    cpu_stats['Minimum'] = min([datapoint['Minimum'] for datapoint in cpu_metrics['Datapoints']])
+
+                # Add to result
+                result.append({
+                    'AWS Account Number': boto3.client('sts').get_caller_identity().get('Account'),
+                    'AWS Account Name': 'N/A',  # Update this field if you have a way to get the account name
+                    'Region': region,
+                    'Instance ID': instance_id,
+                    'ASG Name': asg_name,
+                    'ASG Min Size': asg_min_size,
+                    'ASG Max Size': asg_max_size,
+                    'ASG Desired Capacity': asg_desired_capacity,
+                    'Instance Type': instance_type,
+                    'Instance Age': instance_age,
+                    'tr resource owner': tags.get('tr resource owner', 'N/A'),
+                    'AIID': tags.get('AIID', 'N/A'),
+                    'Environment': tags.get('Environment', 'N/A'),
+                    'Average CPU utilization': cpu_stats['Average'],
+                    'Maximum CPU utilization': cpu_stats['Maximum'],
+                    'Minimum CPU utilization': cpu_stats['Minimum']
+                })
+
+    return result
+
+def main():
+    ec2_info = get_ec2_instances_info()
+    
+    # Output to a file
+    for info in ec2_info:
+        print(info)
+
+if _name_ == "_main_":
+    main()
